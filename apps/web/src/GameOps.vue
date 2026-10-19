@@ -36,6 +36,13 @@
           运营知识库
           <small>{{ docs.length }}</small>
         </button>
+        <button
+          :class="{ active: tab === 'retrieval' }"
+          @click="tab = 'retrieval'"
+        >
+          <search :size="18" />
+          检索实验室
+        </button>
       </nav>
       <div class="ops-history-label">
         最近咨询
@@ -87,7 +94,7 @@
           <span>工作空间</span>
           <chevron-right :size="14" />
           <b>
-            {{ tab === 'chat' ? '智能问答' : tab === 'knowledge' ? '运营知识库' : '模型与服务' }}
+            {{ pageTitle }}
           </b>
         </div>
         <span class="ops-status">
@@ -318,6 +325,10 @@
           暂无匹配文档，试试其他关键词或导入新文档。
         </p>
       </section>
+      <retrieval-lab
+        v-else-if="tab === 'retrieval'"
+        :documents="docs"
+      />
       <section
         v-else
         class="ops-page ops-config"
@@ -347,7 +358,7 @@ GAME_LLM_API_KEY=在本地服务端配置</pre>
           </button>
         </div>
         <p>
-          Redis：{{ model.redis }} · 知识检索：中文分词 + BM25 · 会话与知识：PostgreSQL ·
+          Redis：{{ model.redis }} · 知识检索：{{ model.retrieval || 'bm25' }} · 会话与知识：PostgreSQL ·
           上下文缓存与并发锁：Redis
         </p>
         <a href="/?studio=1">打开原工程工作台 ↗</a>
@@ -445,6 +456,7 @@ import {
   X,
 } from 'lucide-vue-next';
 import { consumeStream } from './gameStream';
+import RetrievalLab from './RetrievalLab.vue';
 
 type Source = { id: string; title: string; content: string; score?: number };
 type Message = {
@@ -459,12 +471,17 @@ type Session = { id: string; title: string; messages: Message[] };
 const sessions = ref<Session[]>([]);
 const selected = ref('');
 const tab = ref('chat');
+
+const pageTitle = computed(() => ({
+  chat: '智能问答', knowledge: '运营知识库', retrieval: '检索实验室', settings: '模型与服务',
+})[tab.value]);
+
 const input = ref('');
 const busy = ref(false);
 const toolCalling = ref(false);
 const status = ref('');
 const notice = ref('');
-const model = ref({ configured: false, model: '', documents: 0, redis: '' });
+const model = ref({ configured: false, model: '', documents: 0, redis: '', retrieval: '' });
 const docs = ref<Source[]>([]);
 const query = ref('');
 const title = ref('');

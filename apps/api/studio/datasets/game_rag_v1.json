@@ -1,0 +1,28 @@
+{
+  "name": "game-rag-dev-v1",
+  "documents": [
+    {"id": "gift", "title": "礼包领取排查", "content": "礼包领取失败时检查有效期、库存耗尽、领取次数以及渠道资格。兑换失败需核对区服和兑换码状态。"},
+    {"id": "delivery", "title": "奖励发放排查", "content": "奖励发放异常时查询领取记录、发奖队列、失败原因和重试记录。本文不授权自动补发奖励。"},
+    {"id": "banner", "title": "Banner 不展示排查", "content": "首页 Banner 不展示时检查发布时间、素材审核、跳转地址、渠道以及客户端缓存。"},
+    {"id": "rollback", "title": "活动下线回滚", "content": "活动下线回滚需要记录影响范围，由负责人审批后暂停投放，恢复已审核的上一版配置。"},
+    {"id": "gray", "title": "灰度人群配置", "content": "灰度人群发布先检查测试白名单、渠道和版本范围，再逐步扩大覆盖。"},
+    {"id": "timezone", "title": "活动投放时区", "content": "活动投放时间必须标注时区，核对服务端时间和客户端时间，排除时区转换错误。"},
+    {"id": "payment", "title": "充值订单排查", "content": "充值订单异常应核对支付流水、渠道回调以及订单状态。不要在聊天中提交银行卡信息。"},
+    {"id": "material", "title": "素材审核", "content": "资源位素材必须先完成审核，检查图片比例、文件大小及跳转链接。"}
+  ],
+  "cases": [
+    {"id": "gift-exact", "query": "礼包领取失败检查什么", "relevant": {"gift": 3}},
+    {"id": "gift-paraphrase", "query": "新手福利领完了", "relevant": {"gift": 3}},
+    {"id": "delivery-paraphrase", "query": "奖励没到账", "relevant": {"delivery": 3}},
+    {"id": "banner-paraphrase", "query": "轮播图看不到", "relevant": {"banner": 3}},
+    {"id": "rollback-paraphrase", "query": "撤回活动", "relevant": {"rollback": 3}},
+    {"id": "gray-exact", "query": "灰度人群测试白名单", "relevant": {"gray": 3}},
+    {"id": "timezone-exact", "query": "活动投放时区错误", "relevant": {"timezone": 3}},
+    {"id": "payment-exact", "query": "充值订单渠道回调", "relevant": {"payment": 3}},
+    {"id": "multi-document", "query": "Banner 素材审核和不展示", "relevant": {"banner": 3, "material": 2}},
+    {"id": "redeem-paraphrase", "query": "兑换不了", "relevant": {"gift": 3}},
+    {"id": "unknown", "query": "火星天气预报", "relevant": {}},
+    {"id": "near-negative", "query": "礼包采购合同税率是多少", "relevant": {}},
+    {"id": "unknown-en", "query": "quantum entanglement", "relevant": {}}
+  ]
+}

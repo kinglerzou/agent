@@ -286,3 +286,160 @@ def test_disconnect_persists_partial_answer_and_releases_lock(tmp_path, monkeypa
             assert repo.redis.get(repo.prefix + 'lock:' + cid) is None
         finally:
             repo.close()
+
+
+def test_retrieval_cache_revision_and_strategy_isolation(tmp_path):
+    with TestClient(create_app(tmp_path / 'studio.db')) as client:
+        endpoint = '/api/game/retrieval/search'
+        body = {'query': '翠玉彗星', 'top_k': 1}
+        before = client.post(endpoint, json=body).json()
+        assert before['sources'] == []
+        assert client.post(endpoint, json=body).json()['trace']['cache_hit'] is True
+        doc = client.post('/api/game/knowledge', json={'title': '翠玉彗星', 'content': '翠玉彗星唯一测试资料'}).json()
+        after = client.post(endpoint, json=body).json()
+        assert after['trace']['revision'] > before['trace']['revision']
+        assert after['trace']['cache_hit'] is False
+        assert after['sources'][0]['document_id'] == doc['id']
+        candidate = client.post(endpoint, json=dict(body, strategy='expanded_bm25')).json()
+        assert candidate['trace']['cache_hit'] is False
+        assert candidate['trace']['strategy'] == 'expanded_bm25'
+        client.delete('/api/game/knowledge/' + doc['id'])
+        assert client.post(endpoint, json=body).json()['sources'] == []
+
+
+def test_vector_cache_model_and_threshold_isolation(tmp_path, monkeypatch):
+    from studio import game_embeddings
+    class Vectors:
+        identity = 'test-embedding-a'
+        def encode(self, texts, kind='document'):
+            return [[1., 0.] for _ in texts]
+    backend = Vectors()
+    monkeypatch.setattr(game_embeddings, 'get_embeddings', lambda: backend)
+    with TestClient(create_app(tmp_path / 'studio.db')) as client:
+        endpoint = '/api/game/retrieval/search'
+        body = {'query': '向量模型隔离测试', 'strategy': 'vector', 'vector_backend': 'local'}
+        result = client.post(endpoint, json=body).json()
+        assert result['trace']['cache_hit'] is False
+        assert client.post(endpoint, json=body).json()['trace']['cache_hit'] is True
+        backend.identity = 'test-embedding-b'
+        changed = client.post(endpoint, json=body).json()
+        assert changed['trace']['cache_hit'] is False
+        assert changed['trace']['embedding_model'] == backend.identity
+        threshold = client.post(endpoint, json=dict(body, min_similarity=.8)).json()
+        assert threshold['trace']['cache_hit'] is False
+        doc = client.post('/api/game/knowledge', json={'title': '向量新增资料', 'content': '测试知识更新'}).json()
+        refreshed = client.post(endpoint, json=body).json()
+        assert refreshed['trace']['revision'] > changed['trace']['revision']
+        client.delete('/api/game/knowledge/' + doc['id'])
+        assert all(s['document_id'] != doc['id'] for s in client.post(endpoint, json=body).json()['sources'])
+
+
+@pytest.fixture
+def vector_repository():
+    from pathlib import Path
+    from studio.game_storage import GameStorage
+    repo = GameStorage()
+    repo.initialize([])
+    with repo.connection() as db:
+        db.execute('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public')
+        db.execute((Path(game.__file__).parent / 'migrations/002_game_vectors.sql').read_text())
+    yield repo
+    repo.close()
+
+
+class PgTestEmbeddings:
+    identity = 'pgvector-test-model-v1'
+    calls = 0
+
+    def encode(self, texts, kind='document'):
+        self.calls += 1
+        return [([1., 0.] if kind == 'query' or '礼包' in text else [0., 1.]) + [0.] * 382 for text in texts]
+
+
+def test_pgvector_matches_local_and_reuses_snapshot(vector_repository):
+    from studio.game_retrieval import RetrievalIndex, RetrievalOptions
+    from studio.game_pgvector import PgVectorStore
+    documents = [{'id': 'gift', 'title': '礼包', 'content': '领取检查库存'},
+                 {'id': 'banner', 'title': 'Banner', 'content': '检查素材'}]
+    embeddings = PgTestEmbeddings()
+    store = PgVectorStore(vector_repository)
+    local = RetrievalIndex(documents, embeddings)
+    postgres = RetrievalIndex(documents, embeddings, store)
+    options = RetrievalOptions(strategy='vector', min_similarity=.5)
+    actual = postgres.search('礼包', options)
+    expected = local.search('礼包', options)
+    assert [s['id'] for s in actual['sources']] == [s['id'] for s in expected['sources']]
+    assert actual['sources'][0]['score'] == pytest.approx(expected['sources'][0]['score'])
+    assert actual['trace']['vector_backend'] == 'pgvector'
+    calls = embeddings.calls
+    assert store.ensure(postgres, embeddings) == postgres.vector_set_id
+    assert embeddings.calls == calls
+    with vector_repository.connection() as db:
+        assert db.execute('SELECT count(*) AS n FROM rag_vectors').fetchone()['n'] == 2
+    ann = postgres.search('礼包', options.model_copy(update={'vector_search_mode': 'hnsw'}))
+    assert ann['sources'][0]['document_id'] == 'gift'
+    assert ann['trace']['vector_search_mode'] == 'hnsw'
+
+
+def test_pgvector_corpus_model_isolation_and_atomic_failure(vector_repository):
+    from studio.game_retrieval import RetrievalIndex, RetrievalOptions
+    from studio.game_pgvector import PgVectorStore, PgVectorUnavailable
+    store = PgVectorStore(vector_repository)
+    embeddings = PgTestEmbeddings()
+    docs = [{'id': 'a', 'title': '礼包', 'content': '旧规则'}, {'id': 'b', 'title': '其他', 'content': '保留'}]
+    old = RetrievalIndex(docs, embeddings, store)
+    old.prepare_vectors()
+    updated = RetrievalIndex(docs[1:], embeddings, store)
+    assert updated.search('礼包', RetrievalOptions(strategy='vector', min_similarity=.5))['sources'] == []
+    assert old.vector_set_id != updated.vector_set_id
+    embeddings.identity = 'pgvector-test-model-v2'
+    rebuilt = RetrievalIndex(docs, embeddings, store)
+    rebuilt.prepare_vectors()
+    assert rebuilt.vector_set_id != old.vector_set_id
+    assert RetrievalIndex([], embeddings, store).search('礼包', RetrievalOptions(strategy='vector'))['sources'] == []
+    class Broken(PgTestEmbeddings):
+        identity = 'broken-model'
+        def encode(self, texts, kind='document'):
+            return [[1., 0.] for _ in texts]
+    with pytest.raises(PgVectorUnavailable, match='384'):
+        RetrievalIndex(docs, Broken(), store).prepare_vectors()
+    with vector_repository.connection() as db:
+        assert db.execute("SELECT count(*) AS n FROM rag_vector_sets WHERE model_identity='broken-model'").fetchone()['n'] == 0
+
+
+def test_pgvector_eval_and_hnsw_index_plan(vector_repository):
+    from studio.game_rag_eval import EvalRequest, evaluate
+    from studio.game_pgvector import PgVectorStore, vector_literal
+    from studio.game_retrieval import RetrievalIndex
+    documents = [{'id': str(i), 'title': '礼包' if i == 0 else '其他', 'content': str(i)} for i in range(80)]
+    embeddings = PgTestEmbeddings()
+    store = PgVectorStore(vector_repository)
+    index = RetrievalIndex(documents, embeddings, store)
+    index.prepare_vectors()
+    query = vector_literal(embeddings.encode(['礼包'], kind='query')[0])
+    with vector_repository.connection() as db:
+        db.execute('SET LOCAL enable_seqscan=off')
+        db.execute('SET LOCAL enable_sort=off')
+        plan = db.execute('''EXPLAIN (FORMAT JSON) SELECT chunk_id FROM rag_vectors
+            WHERE set_id=%s ORDER BY embedding OPERATOR(public.<=>) %s::public.vector LIMIT 4''',
+                          (index.vector_set_id, query)).fetchone()
+        assert 'rag_vectors_cosine_hnsw' in json.dumps(plan)
+    report = evaluate(EvalRequest(corpus='current', vector_backend='pgvector', strategies=['vector','hybrid'],
+                                 cases=[{'id':'gift','query':'礼包','relevant':{'0':3}}]),
+                      documents, revision=9, embeddings=embeddings, vector_store=store)
+    assert report['reports'][0]['summary']['recall'] == 1
+    assert report['reports'][1]['cases'][0]['trace']['vector_backend'] == 'pgvector'
+
+
+def test_missing_pgvector_migration_is_explicit_503(tmp_path, monkeypatch):
+    from studio import game_embeddings
+    monkeypatch.setattr(game_embeddings, 'get_embeddings', lambda: PgTestEmbeddings())
+    with TestClient(create_app(tmp_path / 'studio.db')) as client:
+        response = client.post('/api/game/retrieval/search', json={
+            'query': '礼包', 'strategy': 'vector', 'vector_backend': 'pgvector'})
+        assert response.status_code == 503
+        assert 'migrate:vector' in response.json()['detail']
+        local = client.post('/api/game/retrieval/search', json={
+            'query': '礼包', 'strategy': 'vector', 'vector_backend': 'local'})
+        assert local.status_code == 200
+        assert local.json()['trace']['vector_backend'] == 'local'

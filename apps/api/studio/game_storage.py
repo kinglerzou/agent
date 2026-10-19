@@ -18,6 +18,7 @@ from redis import Redis, RedisError
 from fastapi import HTTPException
 
 from .knowledge import Knowledge
+from .game_retrieval import RetrievalIndex, RetrievalOptions, VERSION, VECTOR_STRATEGIES
 
 
 class GameStorage:
@@ -202,17 +203,43 @@ class GameStorage:
                 raise HTTPException(404, '文档不存在')
             db.execute('UPDATE knowledge_state SET revision=revision+1 WHERE id=1')
 
-    def search(self, query):
+    def knowledge_snapshot(self):
+        # One SQL statement gives revision and documents the same MVCC snapshot.
         with self.connection() as db:
-            revision = db.execute('SELECT revision FROM knowledge_state WHERE id=1').fetchone()['revision']
-        key = 'search:' + str(revision) + ':' + hashlib.sha256(query.encode()).hexdigest()
+            row = db.execute("""SELECT revision, COALESCE(
+                (SELECT jsonb_agg(jsonb_build_object('id',id,'title',title,'content',content) ORDER BY id)
+                 FROM documents), '[]'::jsonb) AS documents FROM knowledge_state WHERE id=1""").fetchone()
+        return row['revision'], row['documents']
+
+    def retrieve(self, query, options=None):
+        options = options or RetrievalOptions()
+        revision, documents = self.knowledge_snapshot()
+        embeddings = None
+        if options.strategy in VECTOR_STRATEGIES:
+            from .game_embeddings import get_embeddings
+            embeddings = get_embeddings()
+        payload = json.dumps([VERSION, query, options.model_dump(), embeddings.identity if embeddings else None],
+                             sort_keys=True)
+        key = 'search:' + str(revision) + ':' + hashlib.sha256(payload.encode()).hexdigest()
         result = self.cache_get(key)
         if result is not None:
+            result['trace']['cache_hit'] = True
             return result
-        ranker = StoredKnowledge(self)
-        result = ranker.search(query, 4)
+        vector_store = None
+        if options.strategy in VECTOR_STRATEGIES and options.vector_backend == 'pgvector':
+            from .game_pgvector import PgVectorStore
+            vector_store = PgVectorStore(self)
+        result = RetrievalIndex(documents, embeddings=embeddings, vector_store=vector_store).search(query, options)
+        result['trace'].update(revision=revision, cache_hit=False)
         self.cache_set(key, result, ttl=300)
         return result
+
+    def search(self, query):
+        options = RetrievalOptions(strategy=os.getenv('GAME_RETRIEVAL_STRATEGY', 'bm25'),
+                                   min_similarity=float(os.getenv('GAME_MIN_SIMILARITY', '.35')),
+                                   vector_backend=os.getenv('GAME_VECTOR_BACKEND', 'pgvector'),
+                                   vector_search_mode=os.getenv('GAME_VECTOR_SEARCH_MODE', 'exact'))
+        return self.retrieve(query, options)['sources']
 
     def import_conversation(self, owner, legacy_id, title, messages):
         with self.connection() as db:

@@ -16,6 +16,7 @@
 
 ## 核心能力
 
+- **可衡量检索**：主应用「检索实验室」提供 BM25 / 同义词扩展 / pgvector 向量 / RRF 混合检索对比、逐题证据、Recall/MRR/nDCG 与无答案误召回率，支持当前知识库人工标注评测及 JSON 导出。
 - **知识问答与来源引用**：导入运营资料，按窗口分块，以中英文分词和 BM25 检索，返回可查看的来源片段；内置资料为演示内容。
 - **真实模型流式生成**：后端请求兼容接口，向浏览器转发 SSE；支持停止生成、错误提示和失败状态保存，没有伪造答案的 Mock 降级。
 - **Tool Calling**：开启后由真实模型生成 `search_knowledge` 参数，经白名单和 Pydantic 校验后执行检索，再将工具结果回传模型生成答案。
@@ -117,6 +118,7 @@ Windows 可用 `python -m venv .venv` 与 `.venv\Scripts\python -m pip install -
 | `apps/server/` / `packages/shared/`                             | 保留的 Node 历史示例与共享类型                         |
 | `compose.yaml` / `infra/k8s/`                                   | 容器与部署模板                                         |
 
+- [检索评测说明](docs/RAG-EVALUATION.md)：指标口径、固定开发集、业务标注、报告导出与复现。
 - [运营助手使用与运维](docs/GAME-OPS.md)：配置、存储、迁移、接口、Tool Calling、LangChain。
 - [架构与设计决策](docs/ARCHITECTURE.md)：三条链路、持久化和安全边界。
 - [Runtime 使用与架构](docs/RUNTIME-DEMO.md)：状态、审批、幂等与恢复。
@@ -153,8 +155,8 @@ Kubernetes 模板仅为 API 与持久卷示例，承载运营助手前需补齐 
 ## 当前边界
 
 - 当前是本地单运营身份：`GAME_OWNER_ID` 不是用户认证，同一部署浏览器共享身份；对外部署需补充鉴权、租户授权和数据访问控制。
-- 真实模型用于运营助手；工程工作台与 Runtime 仍为 Mock，固定回归评测不能代表真实模型质量。
-- 检索采用 BM25，没有向量数据库、Embedding 或重排；上下文按字符预算裁剪，没有自动摘要或精确 token/费用统计。
+- 真实模型用于运营助手；工程工作台与 Runtime 仍为 Mock。检索实验室评估真实词法检索，但不评估生成答案质量；内置开发集不能代表业务泛化效果。
+- 检索支持 BM25、本地多语言 Embedding 与 RRF 混合检索；向量支持 PostgreSQL pgvector 精确/HNSW 查询，本地扫描保留为对照；尚未接入模型重排。上下文仍按字符预算裁剪。
 - 运营问答只调用知识检索工具，不自动修改真实游戏配置；Runtime 写入仅限本地演示订单。
 - 整体应用仍需单 Uvicorn worker、单 API 副本。教学任务重启从任务起点重放，Runtime 从已提交检查点继续，运营问答的过期运行记录标记失败，不自动重发模型请求。
 - 算术沙箱是受限 AST DSL；MCP 为 HTTP JSON-RPC 教学子集；Skills 为可阅读指南；均不等同于通用隔离容器、完整协议兼容或自动执行平台。

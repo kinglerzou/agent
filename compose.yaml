@@ -9,6 +9,11 @@ services:
       GAME_LLM_API_KEY: ${GAME_LLM_API_KEY:-}
       GAME_DATABASE_URL: ${GAME_CONTAINER_DATABASE_URL:-postgresql://game_ops:local-development-only@postgres:5432/game_ops}
       GAME_REDIS_URL: redis://redis:6379/0
+      GAME_VECTOR_BACKEND: ${GAME_VECTOR_BACKEND:-pgvector}
+      GAME_VECTOR_SEARCH_MODE: ${GAME_VECTOR_SEARCH_MODE:-exact}
+      GAME_EMBEDDING_CACHE_DIR: /data/embeddings
+      GAME_RETRIEVAL_STRATEGY: ${GAME_RETRIEVAL_STRATEGY:-bm25}
+      GAME_MIN_SIMILARITY: ${GAME_MIN_SIMILARITY:-0.35}
       GAME_OWNER_ID: ${GAME_OWNER_ID:-local-operator}
     depends_on:
       postgres:
@@ -24,7 +29,7 @@ services:
       retries: 3
     restart: unless-stopped
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:0.8.2-pg16
     environment:
       POSTGRES_DB: game_ops
       POSTGRES_USER: game_ops

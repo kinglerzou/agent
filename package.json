@@ -21,7 +21,9 @@
     "test:legacy": "npm run test -w @studio/server",
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
     "setup:api": "python3 -m venv .venv && .venv/bin/pip install -r apps/api/requirements.txt",
-    "migrate:game": "node --env-file-if-exists=.env scripts/storage-command.mjs"
+    "migrate:game": "node --env-file-if-exists=.env scripts/storage-command.mjs",
+    "migrate:vector": "node --env-file-if-exists=.env scripts/storage-command.mjs scripts/migrate-game-pgvector.py",
+    "eval:rag": "node --env-file-if-exists=.env scripts/storage-command.mjs scripts/evaluate-game-rag.py"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

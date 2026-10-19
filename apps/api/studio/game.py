@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from .game_storage import GameStorage
+from .game_rag import attach_rag_routes
 from .game_tools import plan_search, tool_result
 from .game_langchain import answer_system, retrieval_chain, search_tool
 
@@ -153,6 +154,8 @@ def create_game_router():
             raise HTTPException(503, 'PostgreSQL 连接失败，请检查 GAME_DATABASE_URL')
         return storage
 
+    attach_rag_routes(router, repository)
+
     def owner():
         # Local single-operator identity. Replace with verified SSO identity before multi-user deployment.
         return os.getenv('GAME_OWNER_ID', 'local-operator')
@@ -165,7 +168,7 @@ def create_game_router():
         except RedisError:
             redis_ok = False
         return {'configured': bool(c['base_url'] and c['model']), 'model': c['model'],
-                'documents': len(repo.documents()), 'retrieval': 'BM25', 'orchestration': 'LangChain',
+                'documents': len(repo.documents()), 'retrieval': os.getenv('GAME_RETRIEVAL_STRATEGY', 'bm25'), 'orchestration': 'LangChain',
                 'storage': 'PostgreSQL', 'redis': 'connected' if redis_ok else 'unavailable'}
 
     @router.get('/conversations')
