@@ -1,6 +1,6 @@
 # 游戏中心运营问答助手
 
-新增 **可恢复的 Agent Runtime Demo**：运行 `npm run dev:api` 后打开 <http://127.0.0.1:3001/runtime-demo>。演示模型 → 工具循环、逐步执行、人工审批、暂停/取消、故障重试和持久化恢复；全部使用本地 Mock，无需 API Key。详见 [Runtime Demo 使用与架构](docs/RUNTIME-DEMO.md)。
+新增 **可恢复的 Agent Runtime 基于OPENAI API格式**：运行 `npm run dev:api` 后打开 <http://127.0.0.1:3001/runtime-demo>。演示模型 → 工具循环、逐步执行、人工审批、暂停/取消、故障重试和持久化恢复；全部使用本地 Mock，无需 API Key。详见 [Runtime Demo 使用与架构](docs/RUNTIME-DEMO.md)。
 
 运营助手使用 **PostgreSQL 保存会话、问答与知识，Redis 缓存上下文并控制并发**。本地启动前配置 `.env`，首次升级执行 `npm run migrate:game`；浏览器旧咨询在页面加载时自动迁移。
 
@@ -8,7 +8,7 @@
 
 # Agent Engineering Studio
 
-面向 **Agent 开发工程师** 的全栈实战工程。Python FastAPI 后端 + Vue 3 / TypeScript / ESLint 前端。默认确定性 Mock 模型，**无需 API Key，无外部模型请求**。通过可运行的工具、检索、持久化和追踪学习 JD 中的系统工程能力。
+面向 **Agent 开发工程师** 的全栈实战工程。Python FastAPI 后端 + Vue 3 / TypeScript / ESLint 前端。默认确定性 Mock 模型。通过可运行的工具、检索、持久化和追踪学习 JD 中的系统工程能力。
 
 已有 Node 示例保留在 `apps/server` 作为历史参考；默认开发、构建和测试入口已切换到 Python。不要同时启动两个后端，它们都使用 3001 端口。
 
