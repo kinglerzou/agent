@@ -1,0 +1,42 @@
+{
+  "name": "agent-studio",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"npm run dev:api\" \"npm run dev -w @studio/web\"",
+    "build": "npm run build -w @studio/web",
+    "test": ".venv/bin/python -m pytest apps/api/tests -q",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint . --ext .js,.cjs,.mjs,.ts,.tsx,.vue",
+    "lint:fix": "npm run lint -- --fix",
+    "hooks:install": "node scripts/install-git-hooks.mjs",
+    "prepare": "node scripts/install-git-hooks.mjs",
+    "format": "prettier --write . && npm run lint:fix",
+    "format:check": "prettier --check \"**/*.{css,html,json,md,yml,yaml}\" && npm run lint",
+    "dev:api": "node --env-file-if-exists=.env scripts/dev-api.mjs",
+    "test:legacy": "npm run test -w @studio/server",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build",
+    "setup:api": "python3 -m venv .venv && .venv/bin/pip install -r apps/api/requirements.txt",
+    "migrate:game": "node --env-file-if-exists=.env scripts/storage-command.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "concurrently": "^9.2.0",
+    "eslint": "^8.57.1",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-sonarjs": "^0.25.1",
+    "eslint-plugin-vue": "^9.33.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.0",
+    "vue-eslint-parser": "^9.4.3"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

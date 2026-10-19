@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# pre-commit：对已暂存的文件执行 eslint --fix，并把修复结果重新暂存。
+# 安装：npm run hooks:install（npm install 时通过 prepare 自动安装）
+# 跳过：git commit --no-verify
+
+set -e
+
+# 部分环境（如 x86 git + arm64 shell）下 PATH 里的 git 无法直接执行，这里做一次可用探测
+git_bin=git
+if ! "$git_bin" rev-parse --git-dir >/dev/null 2>&1; then
+  for candidate in /usr/bin/git /usr/local/bin/git; do
+    if [ -x "$candidate" ] && "$candidate" rev-parse --git-dir >/dev/null 2>&1; then
+      git_bin=$candidate
+      break
+    fi
+  done
+fi
+
+staged=$("$git_bin" diff --cached --name-only --diff-filter=ACMR -- \
+  '*.js' '*.jsx' '*.cjs' '*.mjs' '*.ts' '*.tsx' '*.vue')
+
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+printf '%s\n' "$staged" | tr '\n' '\0' | xargs -0 npx --no-install eslint --fix
+
+# --fix 直接改写工作区文件，需要重新暂存，否则修复内容会遗漏在提交之外
+printf '%s\n' "$staged" | while IFS= read -r file; do
+  if [ -f "$file" ]; then
+    "$git_bin" add "$file"
+  fi
+done

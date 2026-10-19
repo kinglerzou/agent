@@ -1,0 +1,58 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      GAME_LLM_BASE_URL: ${GAME_LLM_BASE_URL:-}
+      GAME_LLM_MODEL: ${GAME_LLM_MODEL:-}
+      GAME_LLM_API_KEY: ${GAME_LLM_API_KEY:-}
+      GAME_DATABASE_URL: ${GAME_CONTAINER_DATABASE_URL:-postgresql://game_ops:local-development-only@postgres:5432/game_ops}
+      GAME_REDIS_URL: redis://redis:6379/0
+      GAME_OWNER_ID: ${GAME_OWNER_ID:-local-operator}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - studio-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3001/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: game_ops
+      POSTGRES_USER: game_ops
+      POSTGRES_PASSWORD: local-development-only
+    volumes:
+      - game-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U game_ops -d game_ops"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+volumes:
+  studio-data:
+  game-postgres:

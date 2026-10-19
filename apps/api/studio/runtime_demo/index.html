@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Runtime · 执行实验室</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#182238;font:14px/1.6 system-ui,sans-serif}main{max-width:1320px;margin:36px auto;padding:0 24px}header{display:flex;align-items:center;justify-content:space-between}h1{font-size:30px;margin:4px 0}h2{font-size:17px;margin:0 0 14px}.muted{color:#64748b}.badge{background:#e0f2fe;color:#075985;padding:5px 12px;border-radius:20px}.layout{display:grid;grid-template-columns:290px 1fr;gap:20px;margin-top:24px}.card{background:white;border:1px solid #e2e8f0;border-radius:14px;padding:20px;margin-bottom:16px}label{display:block;margin:12px 0}input,select{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:7px;background:white}input[type=checkbox]{width:auto}button{cursor:pointer;background:#2563eb;color:white;border:0;border-radius:7px;padding:9px 14px;margin:3px 4px 3px 0;font:inherit}button:disabled{opacity:.4;cursor:default}.secondary{background:#eaf0fa;color:#244575}.danger{background:#fee2e2;color:#991b1b}.run{display:block;text-align:left;width:100%;background:#f1f5f9;color:#334155;overflow-wrap:anywhere}.run.selected{outline:2px solid #2563eb}.flow{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.flow span{background:#f1f5f9;padding:7px 12px;border-radius:6px}.flow .active{background:#dbeafe;color:#1d4ed8}.event{border-left:3px solid #93c5fd;padding:6px 12px;margin:12px 0}.event b{font-size:13px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,monospace;background:#f8fafc;padding:12px;border-radius:8px;margin:6px 0}#error{color:#b91c1c;min-height:24px}#answer{font-size:16px;color:#166534}#wait{background:#fff7ed;border-radius:8px;padding:12px;margin:12px 0}details{margin-top:12px}a{color:#2563eb}@media(max-width:800px){.layout{grid-template-columns:1fr}header{display:block}}
+</style>
+<main>
+<header><div><div class="muted">AGENT ENGINEERING / RUNTIME LAB</div><h1>看见 Agent 的每一步</h1><div class="muted">订单查询 → 政策检索 → 人工审批 → 提交退货。所有模型与业务数据均为本地演示。</div></div><span class="badge">Mock · 无 API Key · 无模型请求</span></header>
+<div class="layout"><aside><section class="card"><h2>创建售后任务</h2>
+<label>订单<select id="order"><option>A123</option><option>A124</option><option>B999</option></select></label><p class="muted">A123：符合条件 · A124：超过期限<br>B999：无访问权限</p>
+<label>退货原因<input id="reason" placeholder="留空体验补充信息" maxlength="500"></label>
+<label><input id="auto" type="checkbox"> 自动执行（审批时仍会暂停）</label>
+<label><input id="fault" type="checkbox"> 注入一次工具超时</label>
+<button id="create">创建任务</button></section>
+<section class="card"><h2>最近任务</h2><div id="runs"></div></section></aside>
+<article><section class="card"><h2 id="title">先创建或选择一个任务</h2><div id="meta" class="muted"></div>
+<div class="flow"><span id="model-phase">① 模型决策</span><span>→</span><span id="tool-phase">② 工具执行</span><span>→ 结果回填 → 下一轮模型</span></div>
+<div id="controls"></div><div id="wait" hidden></div><div id="error" role="alert"></div><p id="answer"></p>
+<details><summary>完整消息历史（包括 tool_call_id）</summary><pre id="messages"></pre></details>
+</section><section class="card"><h2>执行时间线</h2><div class="muted">每一步保存检查点。重启 API 后选择任务，即可继续。审批只授权当前展示的参数。</div><div id="events"></div></section></article></div>
+<p class="muted">本地单用户教学 Demo · 无生产认证 · 写入只发生在本地 SQLite · <a href="/docs">API 文档</a></p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let current = null, busy = false, revision = -1;
+const labels = {ready:'就绪',paused:'已暂停',waiting_input:'等待补充信息',waiting_approval:'等待审批',failed:'失败，可检查后重试',completed:'已完成',cancelled:'已取消'};
+async function api(path, body) {
+  const response = await fetch('/api/runtime-demo' + path, body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {});
+  const data = await response.json();
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
+  return data;
+}
+function button(text, action, style='secondary') {
+  const node = document.createElement('button');node.textContent = text;node.className = style;node.disabled = busy;node.onclick = action;return node;
+}
+async function act(action, value='') {
+  if (busy || !current) return;
+  busy = true; $('error').textContent = '';
+  try { const run = await api('/runs/' + current.id + '/actions', {action,value,version:current.version,event_id:crypto.randomUUID()}); busy=false;render(run);await list(); }
+  catch(error) { $('error').textContent = error.message; }
+  finally {busy=false;}
+}
+function render(run) {
+  current=run;revision=run.version;
+  $('title').textContent = labels[run.status];
+  $('meta').textContent = `任务 ${run.id} · 检查点 v${run.version} · 模型 ${run.rounds}/${run.max_rounds} 轮 · ${run.auto?'自动':'逐步'}执行`;
+  $('model-phase').className = run.phase==='model'?'active':'';
+  $('tool-phase').className = run.phase==='tool'?'active':'';
+  $('controls').replaceChildren();
+  const actions = run.status==='ready' ? [['下一步','step'],['暂停','pause']] : run.status==='paused' ? [['继续','resume']] : run.status==='failed' ? [['从失败点重试','retry']] : [];
+  for(const [text,action] of actions) $('controls').append(button(text,()=>act(action)));
+  if(!['completed','cancelled'].includes(run.status)) $('controls').append(button('取消任务',()=>act('cancel'),'danger'));
+  $('wait').hidden = !['waiting_input','waiting_approval'].includes(run.status);$('wait').replaceChildren();
+  if(run.status==='waiting_approval') {
+    const pre=document.createElement('pre');pre.textContent=JSON.stringify(run.pending,null,2);
+    $('wait').append('请确认以下本地模拟写操作：',pre,button('批准此操作',()=>act('approve')));
+  }
+  if(run.status==='waiting_input') {
+    const input=document.createElement('input');input.placeholder='请输入退货原因';input.maxLength=500;
+    $('wait').append('需要补充退货原因',input,button('提交并继续',()=>act('input',input.value)));
+  }
+  $('answer').textContent=run.answer;$('error').textContent=run.error;
+  $('messages').textContent=JSON.stringify(run.messages,null,2);
+  $('events').replaceChildren();
+  for(const event of [...run.events].reverse()) {
+    const row=document.createElement('div');row.className='event';
+    const title=document.createElement('b');title.textContent=`${event.seq.toString().padStart(2,'0')} · ${event.type} · ${new Date(event.time*1000).toLocaleTimeString()}`;
+    const pre=document.createElement('pre');pre.textContent=JSON.stringify(event.data,null,2);row.append(title,pre);$('events').append(row);
+  }
+}
+async function list() {
+  const runs=await api('/runs');$('runs').replaceChildren();
+  for(const run of runs) $('runs').append(button(`${run.id.slice(0,8)} · ${labels[run.status]}`,()=>render(run),'run'+(current?.id===run.id?' selected':'')));
+}
+$('create').onclick=async()=>{
+  if(busy)return;busy=true;
+  try { render(await api('/runs',{order_id:$('order').value,reason:$('reason').value,auto:$('auto').checked,fault:$('fault').checked}));busy=false;render(current);await list(); }
+  catch(error){$('error').textContent=error.message;}finally{busy=false;}
+};
+let polling=false;
+setInterval(async()=>{
+  if(busy||polling||!current)return;polling=true;
+  const id=current.id;
+  try {const run=await api('/runs/'+id);if(!busy&&current.id===id&&run.version>revision){render(run);await list();}}
+  catch(error){$('error').textContent=error.message;}finally{polling=false;}
+},1000);
+list().catch(error=>$('error').textContent=error.message);
+</script>
+</html>
