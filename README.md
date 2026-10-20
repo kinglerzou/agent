@@ -120,6 +120,7 @@ Windows 可用 `python -m venv .venv` 与 `.venv\Scripts\python -m pip install -
 
 - [检索评测说明](docs/RAG-EVALUATION.md)：指标口径、固定开发集、业务标注、报告导出与复现。
 - [运营助手使用与运维](docs/GAME-OPS.md)：配置、存储、迁移、接口、Tool Calling、LangChain。
+- [运营助手存储字典](docs/GAME-STORAGE.md)：PostgreSQL 全部表的字段、关联与读写流程，以及 Redis 键、TTL 和查询示例。
 - [架构与设计决策](docs/ARCHITECTURE.md)：三条链路、持久化和安全边界。
 - [Runtime 使用与架构](docs/RUNTIME-DEMO.md)：状态、审批、幂等与恢复。
 - [能力与学习地图](docs/JD-MAP.md)：代码落点、练习和进阶方向。
