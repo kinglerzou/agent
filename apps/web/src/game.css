@@ -719,8 +719,14 @@
     gap: 0;
   }
   .ops-new span,
-  .ops-settings span { display: none; }
-  .ops-sidebar nav { margin-top: 16px; flex: 1; align-content: start; }
+  .ops-settings span {
+    display: none;
+  }
+  .ops-sidebar nav {
+    margin-top: 16px;
+    flex: 1;
+    align-content: start;
+  }
 }
 
 .ops-history-row {
@@ -743,4 +749,51 @@
 .ops-history .ops-history-delete:hover:not(:disabled) {
   color: #a14c42;
   background: #f4e5df;
+}
+
+.ops-review {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid #d6d9f4;
+  border-radius: 12px;
+  background: #f7f8ff;
+}
+.ops-review p,
+.ops-review-audit {
+  font-size: 13px;
+  color: #596078;
+}
+.ops-review label {
+  display: block;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.ops-review textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #cdd3e0;
+  border-radius: 8px;
+  font: inherit;
+  resize: vertical;
+}
+.ops-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.ops-review button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ops-review-label {
+  display: block;
+  color: #805d17;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.ops-review-audit {
+  margin-top: 12px;
 }

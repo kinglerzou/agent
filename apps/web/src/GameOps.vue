@@ -183,6 +183,14 @@
               </div>
               <div class="ops-message-body">
                 <b>{{ message.role === 'user' ? '我' : '运营助手' }}</b>
+                <small
+                  v-if="message.status === 'draft'"
+                  class="ops-review-label"
+                >正在生成待审核草稿</small>
+                <small
+                  v-if="message.status === 'rejected'"
+                  class="ops-review-label"
+                >已驳回 · 未进入对话上下文</small>
                 <div class="ops-answer">
                   {{ message.content }}
                 </div>
@@ -228,25 +236,71 @@
                     [{{ sourceIndex + 1 }}] {{ source.title }}
                   </button>
                 </div>
+                <answer-review
+                  v-if="message.status === 'pending_review' && message.turn_id"
+                  :conversation-id="current.id"
+                  :turn-id="message.turn_id"
+                  :draft="message.content"
+                  @reviewed="Object.assign(message, $event)"
+                />
+                <div
+                  v-if="message.review"
+                  class="ops-review-audit"
+                >
+                  <small>
+                    审核人：{{ message.review.reviewer }} · {{ new Date(message.review.reviewed_at).toLocaleString() }}
+                  </small>
+                  <p v-if="message.review.decision.comment">
+                    审核意见：{{ message.review.decision.comment }}
+                  </p>
+                  <details v-if="message.review.decision.action === 'edit'">
+                    <summary>查看修改前草稿</summary>
+                    <div class="ops-answer">
+                      {{ message.draft }}
+                    </div>
+                  </details>
+                </div>
                 <small
                   v-if="message.complete"
                   class="ops-complete"
                 >
                   <check :size="12" />
-                  回答完成
+                  {{ message.review ? '审核通过 · 回答完成' : '回答完成' }}
                 </small>
               </div>
             </article>
           </div>
         </div>
         <div class="ops-composer-wrap">
+          <p
+            v-if="pendingReview"
+            class="ops-review-label"
+          >
+            请先处理上方待审核回答，再继续本次咨询。
+          </p>
+          <label>
+            <input
+              v-model="humanReview"
+              type="checkbox"
+              :disabled="busy || pendingReview"
+            >
+            人工审核 · 回答通过后才进入后续对话
+          </label>
           <label>
             <input
               v-model="toolCalling"
               type="checkbox"
-              :disabled="busy"
+              :disabled="busy || subagents"
             >
             Tool Calling · 由模型调用知识检索
+          </label>
+          <label>
+            <input
+              v-model="subagents"
+              type="checkbox"
+              :disabled="busy || pendingReview"
+            >
+            子 Agent · 自动委派运营配置或故障排查（包含知识检索）
           </label>
           <form
             class="ops-composer"
@@ -257,7 +311,7 @@
               aria-label="输入运营问题"
               placeholder="描述你的配置问题，例如：活动已发布，为什么首页看不到？"
               maxlength="6000"
-              :disabled="busy"
+              :disabled="busy || pendingReview"
               @keydown.enter.exact.prevent="send()"
             />
             <div>
@@ -274,7 +328,7 @@
                 v-else
                 type="submit"
                 aria-label="发送问题"
-                :disabled="!input.trim()"
+                :disabled="!input.trim() || pendingReview"
               >
                 <arrow-up :size="20" />
               </button>
@@ -457,16 +511,9 @@ import {
 } from 'lucide-vue-next';
 import { consumeStream } from './gameStream';
 import RetrievalLab from './RetrievalLab.vue';
+import AnswerReview from './AnswerReview.vue';
+import { applyMessageEvent, isSettled, type Message, type Source } from './gameMessages';
 
-type Source = { id: string; title: string; content: string; score?: number };
-type Message = {
-  role: 'user' | 'assistant';
-  content: string;
-  sources?: Source[];
-  toolTrace?: string[];
-  error?: string;
-  complete?: boolean;
-};
 type Session = { id: string; title: string; messages: Message[] };
 const sessions = ref<Session[]>([]);
 const selected = ref('');
@@ -479,6 +526,9 @@ const pageTitle = computed(() => ({
 const input = ref('');
 const busy = ref(false);
 const toolCalling = ref(false);
+const subagents = ref(false);
+const humanReview = ref(true);
+const pendingReview = computed(() => current.value?.messages.some((message) => message.status === 'pending_review'));
 const status = ref('');
 const notice = ref('');
 const model = ref({ configured: false, model: '', documents: 0, redis: '', retrieval: '' });
@@ -621,33 +671,6 @@ async function scroll() {
   feed.value?.scrollTo({ top: feed.value.scrollHeight, behavior: 'smooth' });
 }
 
-function applyToolEvent(event: { type: string; name?: string; query?: string; count?: number }, answer: Message) {
-  if (event.type === 'tool_call') {
-    answer.toolTrace = [`${event.name}(${JSON.stringify({ query: event.query })})`];
-  }
-  if (event.type === 'tool_result') answer.toolTrace?.push(`检索完成：命中 ${event.count ?? 0} 个知识片段`);
-}
-
-function applyEvent(data: string, answer: Message) {
-  const event = JSON.parse(data) as {
-    type: string;
-    text?: string;
-    message?: string;
-    sources?: Source[];
-    name?: string;
-    query?: string;
-    count?: number;
-  };
-
-  applyToolEvent(event, answer);
-  if (event.type === 'token') answer.content += event.text ?? '';
-  if (event.type === 'sources') answer.sources = event.sources ?? [];
-  if (event.type === 'status') status.value = event.message ?? '';
-  if (event.type === 'error') throw new Error(event.message ?? '生成失败');
-  if (event.type === 'done') answer.complete = true;
-  void scroll();
-}
-
 function requestError(error: unknown) {
   if (!(error instanceof Error)) return '请求失败';
 
@@ -655,7 +678,7 @@ function requestError(error: unknown) {
 }
 
 async function send(text = input.value) {
-  if (busy.value || !text.trim() || !current.value) return;
+  if (busy.value || pendingReview.value || !text.trim() || !current.value) return;
   const conversation = current.value;
   const question = text.trim();
 
@@ -667,7 +690,7 @@ async function send(text = input.value) {
   conversation.messages.push({ role: 'user', content: question });
   conversation.title = question.slice(0, 24);
 
-  conversation.messages.push({ role: 'assistant', content: '', sources: [] });
+  conversation.messages.push({ role: 'assistant', content: '', sources: [], status: humanReview.value ? 'draft' : 'running' });
 
   const answer = conversation.messages[conversation.messages.length - 1]!;
 
@@ -685,6 +708,8 @@ async function send(text = input.value) {
         request_id: crypto.randomUUID(),
         message: question,
         tool_calling: toolCalling.value,
+        subagents: subagents.value,
+        human_review: humanReview.value,
       }),
       signal: controller.signal,
     });
@@ -694,8 +719,11 @@ async function send(text = input.value) {
       throw new Error(typeof error.detail === 'string' ? error.detail : '请求失败，请稍后重试');
     }
     if (!response.body) throw new Error('浏览器不支持流式响应');
-    await consumeStream(response.body, (data) => applyEvent(data, answer));
-    if (!answer.complete) throw new Error('连接中断，请重新提问');
+    await consumeStream(response.body, (data) => {
+      applyMessageEvent(data, answer, (message) => { status.value = message; });
+      void scroll();
+    });
+    if (!isSettled(answer)) throw new Error('连接中断，请重新打开咨询确认状态');
   } catch (error) {
     answer.error = requestError(error);
   } finally {

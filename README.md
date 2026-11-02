@@ -1,6 +1,6 @@
 # 游戏中心运营问答助手 · Agent Engineering Studio
 
-基于 **Vue 3 + TypeScript + FastAPI + LangChain + PostgreSQL + Redis** 的全栈 Agent 实战项目。主应用面向游戏运营知识问答，已接入真实的 **OpenAI 兼容 Chat Completions 模型 API**，支持知识导入、多轮对话、引用溯源、SSE 流式回答，以及由模型发起的知识检索工具调用。
+基于 **Vue 3 + TypeScript + FastAPI + LangChain + LangGraph + PostgreSQL + Redis** 的全栈 Agent 实战项目。主应用面向游戏运营知识问答，已接入真实的 **OpenAI 兼容 Chat Completions 模型 API**，支持知识导入、多轮对话、引用溯源、SSE 流式回答，以及由模型发起的知识检索工具调用。
 
 项目同时保留工程教学工作台与可恢复 Runtime，用于学习任务编排、上下文管理、工具安全、人工审批、故障恢复与评测。三个入口共享 FastAPI 服务，但模型实现和存储边界不同。
 
@@ -21,6 +21,7 @@
 - **真实模型流式生成**：后端请求兼容接口，向浏览器转发 SSE；支持停止生成、错误提示和失败状态保存，没有伪造答案的 Mock 降级。
 - **Tool Calling**：开启后由真实模型生成 `search_knowledge` 参数，经白名单和 Pydantic 校验后执行检索，再将工具结果回传模型生成答案。
 - **LangChain 编排**：自定义 Retriever、LCEL 检索链、StructuredTool 和 PromptTemplate 复用现有存储与模型网关。
+- **人工审核**：默认开启回答草稿审核，通过 / 修改后通过 / 驳回；LangGraph interrupt 与 PostgreSQL 检查点支持重启后恢复，仅通过的回答进入上下文。见 [人工审核说明](docs/HUMAN-REVIEW.md)。
 - **服务端多轮上下文**：从 PostgreSQL 读取完整历史轮次，在字符预算内组装；Redis 缓存近期上下文与检索结果。
 - **可靠性与持久化**：请求 ID 去重、会话生成锁、取消/失败归档、知识版本失效和旧数据迁移。
 - **工程学习环境**：独立演示任务队列、工具追踪、长期记忆、固定回归评测、MCP 教学子集，以及带人工审批的可恢复执行循环。

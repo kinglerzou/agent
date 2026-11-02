@@ -443,3 +443,106 @@ def test_missing_pgvector_migration_is_explicit_503(tmp_path, monkeypatch):
             'query': '礼包', 'strategy': 'vector', 'vector_backend': 'local'})
         assert local.status_code == 200
         assert local.json()['trace']['vector_backend'] == 'local'
+
+
+@pytest.mark.parametrize('decision,expected_status,expected_answer', [
+    ({'action': 'approve'}, 'completed', '检查库存。[1]'),
+    ({'action': 'edit', 'answer': '先检查有效期。[1]', 'comment': '补充顺序'}, 'completed', '先检查有效期。[1]'),
+    ({'action': 'reject', 'comment': '证据不足'}, 'rejected', '检查库存。[1]'),
+])
+def test_durable_human_review(tmp_path, monkeypatch, decision, expected_status, expected_answer):
+    from studio.game_storage import GameStorage
+    configured(monkeypatch)
+    calls = []
+    async def fake(config, messages):
+        calls.append(messages)
+        yield '检查库存。[1]'
+    monkeypatch.setattr(game, 'model_tokens', fake)
+    path = tmp_path / 'studio.db'
+    with TestClient(create_app(path)) as client:
+        cid = new_conversation(client)
+        payload = {'conversation_id': cid, 'request_id': str(uuid.uuid4()),
+                   'message': '礼包领取失败', 'human_review': True}
+        result = events(client.post('/api/game/chat', json=payload))
+        assert result[-1]['type'] == 'pending_review'
+        assert all(event['type'] != 'done' for event in result)
+        turn_id = result[-1]['turn_id']
+        assert events(client.post('/api/game/chat', json=payload))[-1]['type'] == 'pending_review'
+        assert len(calls) == 1
+        assert ask(client, cid, '追问').status_code == 409
+        repo = GameStorage()
+        repo.initialize([])
+        try:
+            assert repo.context('test-owner', cid) == []
+        finally:
+            repo.close()
+    # Recreate app/storage: pending review and graph checkpoint must survive restart.
+    with TestClient(create_app(path)) as client:
+        message = client.get('/api/game/conversations/' + cid).json()['messages'][-1]
+        assert message['status'] == 'pending_review' and not message['complete']
+        endpoint = f'/api/game/conversations/{cid}/turns/{turn_id}/review'
+        monkeypatch.setenv('GAME_OWNER_ID', 'different-owner')
+        assert client.post(endpoint, json=decision).status_code == 404
+        monkeypatch.setenv('GAME_OWNER_ID', 'test-owner')
+        assert client.post(endpoint, json={'action': 'edit', 'answer': ' '}).status_code == 422
+        approved = client.post(endpoint, json=decision)
+        assert approved.status_code == 200, approved.text
+        message = approved.json()
+        assert message['status'] == expected_status
+        assert message['content'] == expected_answer
+        assert message['draft'] == '检查库存。[1]'
+        assert message['review']['reviewer'] == 'test-owner'
+        assert client.post(endpoint, json=decision).json() == message
+        conflict = {'action': 'reject', 'comment': '另外一个审核'}
+        assert client.post(endpoint, json=conflict).status_code == 409
+        repo = GameStorage()
+        repo.initialize([])
+        try:
+            context = repo.context('test-owner', cid)
+            assert len(context) == (1 if expected_status == 'completed' else 0)
+            if context:
+                assert context[0][1]['content'] == expected_answer
+        finally:
+            repo.close()
+        assert len(calls) == 1  # Resume does not call the model again.
+        assert client.delete('/api/game/conversations/' + cid).status_code == 200
+
+
+def test_review_transaction_rollback_and_concurrent_decisions():
+    from concurrent.futures import ThreadPoolExecutor
+    from fastapi import HTTPException
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from studio.game_review import ReviewDecision, review_graph
+    from studio.game_storage import GameStorage
+    repo = GameStorage()
+    repo.initialize([])
+    try:
+        cid = repo.new_conversation('owner')['id']
+        turn, _ = repo.start('owner', cid, uuid.uuid4(), '问题')
+        repo.queue_review('owner', cid, turn['id'], '草稿', [])
+        with repo.connection() as db:
+            db.execute('''CREATE FUNCTION fail_review() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN IF NEW.status='completed' THEN RAISE EXCEPTION 'test rollback'; END IF;
+                RETURN NEW; END $$''')
+            db.execute('CREATE TRIGGER fail_review BEFORE UPDATE ON turns FOR EACH ROW EXECUTE FUNCTION fail_review()')
+        with pytest.raises(psycopg.Error):
+            repo.review_answer('owner', cid, turn['id'], ReviewDecision(action='approve'))
+        assert repo.conversation('owner', cid)['messages'][-1]['status'] == 'pending_review'
+        with repo.connection() as db:
+            graph = review_graph(PostgresSaver(db))
+            assert graph.get_state({'configurable': {'thread_id': str(turn['id'])}}).next == ('human_review',)
+            db.execute('DROP TRIGGER fail_review ON turns')
+        def decide(action):
+            try:
+                return repo.review_answer('owner', cid, turn['id'], ReviewDecision(action=action, comment='已核对'))['status']
+            except HTTPException as exc:
+                return exc.status_code
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(decide, ['approve', 'reject']))
+        assert 409 in results
+        assert any(result in ('completed', 'rejected') for result in results)
+        repo.delete_conversation('owner', cid)
+        with repo.connection() as db:
+            assert PostgresSaver(db).get_tuple({'configurable': {'thread_id': str(turn['id'])}}) is None
+    finally:
+        repo.close()

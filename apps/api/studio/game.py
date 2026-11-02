@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from .game_storage import GameStorage
+from .game_review import ReviewDecision
 from .game_rag import attach_rag_routes
 from .game_tools import plan_search, tool_result
 from .game_langchain import answer_system, retrieval_chain, search_tool
@@ -45,6 +46,7 @@ class GameMessage(BaseModel):
 
 
 class GameChat(BaseModel):
+    human_review: bool = False
     tool_calling: bool = False
     conversation_id: UUID
     request_id: UUID
@@ -168,7 +170,7 @@ def create_game_router():
         except RedisError:
             redis_ok = False
         return {'configured': bool(c['base_url'] and c['model']), 'model': c['model'],
-                'documents': len(repo.documents()), 'retrieval': os.getenv('GAME_RETRIEVAL_STRATEGY', 'bm25'), 'orchestration': 'LangChain',
+                'documents': len(repo.documents()), 'retrieval': os.getenv('GAME_RETRIEVAL_STRATEGY', 'bm25'), 'orchestration': 'LangChain + LangGraph',
                 'storage': 'PostgreSQL', 'redis': 'connected' if redis_ok else 'unavailable'}
 
     @router.get('/conversations')
@@ -191,6 +193,11 @@ def create_game_router():
     def delete_conversation(conversation_id: UUID, repo=Depends(repository), user=Depends(owner)):
         repo.delete_conversation(user, conversation_id)
         return {'deleted': True}
+
+    @router.post('/conversations/{conversation_id}/turns/{turn_id}/review')
+    def review(conversation_id: UUID, turn_id: UUID, body: ReviewDecision,
+               repo=Depends(repository), user=Depends(owner)):
+        return repo.review_answer(user, conversation_id, turn_id, body)
 
     @router.get('/knowledge')
     def documents(repo=Depends(repository)):
@@ -233,7 +240,10 @@ def create_game_router():
                 if replay:
                     yield encode({'type': 'sources', 'sources': turn['sources']})
                     yield encode({'type': 'token', 'text': turn['answer']})
-                    yield encode({'type': 'done', 'request_id': str(body.request_id)})
+                    if turn.get('status') in ('pending_review', 'rejected'):
+                        yield encode({'type': turn['status'], 'turn_id': str(turn['id'])})
+                    else:
+                        yield encode({'type': 'done', 'request_id': str(body.request_id)})
                     return
                 yield encode({'type': 'status', 'message': '正在读取服务端上下文并通过 LangChain 检索知识库'})
                 deadline = asyncio.get_running_loop().time() + 90
@@ -274,6 +284,11 @@ def create_game_router():
                             yield encode({'type': 'token', 'text': text})
                     if not answer:
                         raise RuntimeError('模型未返回正文，请检查模型是否支持文本流式回答')
+                if body.human_review:
+                    await asyncio.to_thread(repo.queue_review, user, body.conversation_id, turn['id'], answer, sources)
+                    outcome = 'pending_review'
+                    yield encode({'type': 'pending_review', 'turn_id': str(turn['id'])})
+                    return
                 # Never announce success until the authoritative database commit succeeds.
                 saved = await asyncio.to_thread(repo.finish, turn['id'], 'completed', answer, sources)
                 if not saved:
@@ -295,7 +310,7 @@ def create_game_router():
                 # Starlette cancels the stream on disconnect; shield durable cleanup from its cancel scope.
                 with anyio.CancelScope(shield=True):
                     try:
-                        if not replay and outcome != 'completed':
+                        if not replay and outcome not in ('completed', 'pending_review'):
                             await asyncio.to_thread(repo.finish, turn['id'], outcome, answer, sources, error)
                     finally:
                         await asyncio.to_thread(repo.unlock, body.conversation_id, token)

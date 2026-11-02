@@ -16,6 +16,10 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from redis import Redis, RedisError
 from fastapi import HTTPException
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.types import Command
+
+from .game_review import ReviewDecision, review_graph
 
 from .knowledge import Knowledge
 from .game_retrieval import RetrievalIndex, RetrievalOptions, VERSION, VECTOR_STRATEGIES
@@ -43,11 +47,20 @@ class GameStorage:
                 db.execute(sql.SQL('CREATE SCHEMA IF NOT EXISTS {}').format(sql.Identifier(self.schema)))
                 db.execute(sql.SQL('SET LOCAL search_path TO {}').format(sql.Identifier(self.schema)))
                 db.execute((Path(__file__).parent / 'migrations/001_game.sql').read_text())
+                db.execute((Path(__file__).parent / 'migrations/003_game_review.sql').read_text())
                 if not db.execute("SELECT 1 FROM data_imports WHERE name='seeds-v1'").fetchone():
                     for doc in seeds:
                         db.execute('INSERT INTO documents(id,title,content) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING', doc)
                     db.execute("INSERT INTO data_imports(name) VALUES('seeds-v1')")
                     db.execute('UPDATE knowledge_state SET revision=revision+1 WHERE id=1')
+            # Official saver migrations include CREATE INDEX CONCURRENTLY (autocommit).
+            with psycopg.connect(self.url, autocommit=True, row_factory=dict_row,
+                                 options='-c search_path=' + self.schema, connect_timeout=3) as db:
+                db.execute('SELECT pg_advisory_lock(hashtext(%s))', ('game-checkpoints:' + self.schema,))
+                try:
+                    PostgresSaver(db).setup()
+                finally:
+                    db.execute('SELECT pg_advisory_unlock(hashtext(%s))', ('game-checkpoints:' + self.schema,))
             self.pool = ConnectionPool(self.url, min_size=0, max_size=8, timeout=5, open=True,
                                        kwargs={'row_factory': dict_row, 'connect_timeout': 3,
                                                'options': '-c search_path=' + self.schema + ' -c statement_timeout=5000'},
@@ -119,7 +132,8 @@ class GameStorage:
         for turn in turns:
             messages.append({'role': 'user', 'content': turn['question']})
             messages.append({'role': 'assistant', 'content': turn['answer'], 'sources': turn['sources'],
-                             'complete': turn['status'] == 'completed', 'status': turn['status'], 'error': turn['error']})
+                             'complete': turn['status'] == 'completed', 'status': turn['status'], 'error': turn['error'],
+                             'turn_id': str(turn['id']), 'review': turn.get('review'), 'draft': turn.get('draft', '')})
         return messages
 
     def conversation(self, owner, conversation_id):
@@ -135,6 +149,9 @@ class GameStorage:
             self.expire_turns(db, conversation_id)
             if db.execute("SELECT 1 FROM turns WHERE conversation_id=%s AND status='running'", (conversation_id,)).fetchone():
                 raise HTTPException(409, '回答生成中，请停止或等待完成后删除')
+            saver = PostgresSaver(db)
+            for turn in db.execute('SELECT id FROM turns WHERE conversation_id=%s', (conversation_id,)).fetchall():
+                saver.delete_thread(str(turn['id']))
             db.execute('DELETE FROM conversations WHERE id=%s', (conversation_id,))
         # Ownership and existence are always checked in PostgreSQL before cache reads.
         try:
@@ -151,11 +168,11 @@ class GameStorage:
             if existing:
                 if existing['question'] != question:
                     raise HTTPException(409, '同一 request_id 不能用于不同问题')
-                if existing['status'] != 'completed':
+                if existing['status'] not in ('completed', 'pending_review', 'rejected'):
                     raise HTTPException(409, '该请求已受理或已中断，请读取咨询记录；重新提问须使用新的 request_id')
                 return existing, True
-            if db.execute("SELECT 1 FROM turns WHERE conversation_id=%s AND status='running'", (conversation_id,)).fetchone():
-                raise HTTPException(409, '该咨询已有生成任务')
+            if db.execute("SELECT 1 FROM turns WHERE conversation_id=%s AND status IN ('running','pending_review')", (conversation_id,)).fetchone():
+                raise HTTPException(409, '该咨询已有生成任务或待审核回答，请先处理')
             row = db.execute("INSERT INTO turns(id,conversation_id,request_id,question,status,deadline) VALUES(%s,%s,%s,%s,'running',now()+interval '120 seconds') RETURNING *",
                              (uuid.uuid4(), conversation_id, request_id, question)).fetchone()
             db.execute('UPDATE conversations SET title=%s,updated_at=now() WHERE id=%s', (question[:24], conversation_id))
@@ -173,6 +190,45 @@ class GameStorage:
             if row:
                 db.execute('UPDATE conversations SET revision=revision+1,updated_at=now() WHERE id=%s', (row['conversation_id'],))
         return row is not None
+
+    def queue_review(self, owner, conversation_id, turn_id, answer, sources):
+        with self.connection() as db:
+            self.require(db, owner, conversation_id, lock=True)
+            turn = db.execute("SELECT * FROM turns WHERE id=%s AND conversation_id=%s AND status='running' AND deadline>now() FOR UPDATE",
+                              (turn_id, conversation_id)).fetchone()
+            if not turn:
+                raise HTTPException(409, '该生成任务已过期，请重新提问')
+            graph = review_graph(PostgresSaver(db))
+            result = graph.invoke({'question': turn['question'], 'draft': answer, 'sources': sources},
+                                  {'configurable': {'thread_id': str(turn_id)}})
+            if not result.get('__interrupt__'):
+                raise RuntimeError('审核流程未正确暂停')
+            # Checkpoint and turn status commit together, so reconnects never lose a review.
+            db.execute("UPDATE turns SET status='pending_review',answer=%s,draft=%s,sources=%s,deadline=NULL WHERE id=%s",
+                       (answer, answer, Jsonb(sources), turn_id))
+
+    def review_answer(self, owner, conversation_id, turn_id, decision: ReviewDecision):
+        payload = decision.model_dump()
+        with self.connection() as db:
+            self.require(db, owner, conversation_id, lock=True)
+            turn = db.execute('SELECT * FROM turns WHERE id=%s AND conversation_id=%s FOR UPDATE',
+                              (turn_id, conversation_id)).fetchone()
+            if not turn:
+                raise HTTPException(404, '回答不存在')
+            if turn['status'] != 'pending_review':
+                if turn['review'] and turn['review']['decision'] == payload:
+                    return self.messages([turn])[-1]  # Retry after a lost HTTP response.
+                raise HTTPException(409, '该回答不在待审核状态或已由其他审核操作处理')
+            graph = review_graph(PostgresSaver(db))
+            result = graph.invoke(Command(resume=payload), {'configurable': {'thread_id': str(turn_id)}})
+            if result.get('status') not in ('completed', 'rejected'):
+                raise RuntimeError('审核流程未完成')
+            reviewed_at = db.execute('SELECT now() AS value').fetchone()['value'].isoformat()
+            audit = {'reviewer': owner, 'reviewed_at': reviewed_at, 'decision': payload}
+            row = db.execute("UPDATE turns SET status=%s,answer=%s,review=%s,finished_at=now() WHERE id=%s RETURNING *",
+                             (result['status'], result['answer'], Jsonb(audit), turn_id)).fetchone()
+            db.execute('UPDATE conversations SET revision=revision+1,updated_at=now() WHERE id=%s', (conversation_id,))
+        return self.messages([row])[-1]
 
     def context(self, owner, conversation_id):
         with self.connection() as db:
